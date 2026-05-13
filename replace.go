@@ -12,18 +12,45 @@ import (
 	"time"
 )
 
+// ProgressFunc is called periodically during download with bytes downloaded and total size.
+type ProgressFunc func(downloaded, total int64)
+
 // ReplaceResult holds the result of a binary replacement.
 type ReplaceResult struct {
 	OldPath    string
 	BackupPath string
 }
 
+// DownloadConfig controls download behavior.
+type DownloadConfig struct {
+	MaxRetries int           // default: 3
+	RetryDelay time.Duration // default: 2s
+	Timeout    time.Duration // default: 5min
+	Progress   ProgressFunc
+}
+
+func (c *DownloadConfig) defaults() {
+	if c.MaxRetries <= 0 {
+		c.MaxRetries = 3
+	}
+	if c.RetryDelay <= 0 {
+		c.RetryDelay = 2 * time.Second
+	}
+	if c.Timeout <= 0 {
+		c.Timeout = 5 * time.Minute
+	}
+}
+
 // DownloadAndReplace downloads the asset, validates it, and atomically replaces
 // the current binary. On success it returns the backup path (caller should clean up).
-func DownloadAndReplace(asset *Asset, logger func(string, ...interface{})) (*ReplaceResult, error) {
+func DownloadAndReplace(asset *Asset, logger func(string, ...interface{}), cfg *DownloadConfig) (*ReplaceResult, error) {
 	if logger == nil {
 		logger = func(string, ...interface{}) {}
 	}
+	if cfg == nil {
+		cfg = &DownloadConfig{}
+	}
+	cfg.defaults()
 
 	exePath, err := os.Executable()
 	if err != nil {
@@ -34,8 +61,7 @@ func DownloadAndReplace(asset *Asset, logger func(string, ...interface{})) (*Rep
 		return nil, fmt.Errorf("resolve symlinks: %w", err)
 	}
 
-	logger("downloading %s ...", asset.URL)
-	tmpFile, err := downloadToTemp(asset)
+	tmpFile, err := downloadWithRetry(asset, cfg, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -50,8 +76,27 @@ func DownloadAndReplace(asset *Asset, logger func(string, ...interface{})) (*Rep
 	return replaceBinary(exePath, tmpFile)
 }
 
-func downloadToTemp(asset *Asset) (string, error) {
-	client := &http.Client{Timeout: 5 * time.Minute}
+func downloadWithRetry(asset *Asset, cfg *DownloadConfig, logger func(string, ...interface{})) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
+		if attempt > 0 {
+			logger("retry %d/%d after %v ...", attempt, cfg.MaxRetries, cfg.RetryDelay)
+			time.Sleep(cfg.RetryDelay)
+			cfg.RetryDelay = cfg.RetryDelay * 3 / 2 // exponential backoff
+		}
+
+		tmpFile, err := downloadToTemp(asset, cfg, logger)
+		if err == nil {
+			return tmpFile, nil
+		}
+		lastErr = err
+		logger("download error: %v", err)
+	}
+	return "", fmt.Errorf("download failed after %d retries: %w", cfg.MaxRetries, lastErr)
+}
+
+func downloadToTemp(asset *Asset, cfg *DownloadConfig, logger func(string, ...interface{})) (string, error) {
+	client := &http.Client{Timeout: cfg.Timeout}
 
 	resp, err := client.Get(asset.URL)
 	if err != nil {
@@ -60,7 +105,7 @@ func downloadToTemp(asset *Asset) (string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download returned %d", resp.StatusCode)
+		return "", fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
 
 	f, err := os.CreateTemp("", "selfupdate-*.tmp")
@@ -68,11 +113,47 @@ func downloadToTemp(asset *Asset) (string, error) {
 		return "", fmt.Errorf("create temp file: %w", err)
 	}
 
-	if _, err := io.Copy(f, io.LimitReader(resp.Body, 500<<20)); err != nil {
-		f.Close()
-		os.Remove(f.Name())
-		return "", fmt.Errorf("write download: %w", err)
+	total := asset.Size
+	if total <= 0 {
+		total = resp.ContentLength
 	}
+
+	var written int64
+	buf := make([]byte, 32*1024)
+	lastReport := time.Now()
+
+	for {
+		nr, readErr := resp.Body.Read(buf)
+		if nr > 0 {
+			nw, writeErr := f.Write(buf[:nr])
+			if writeErr != nil {
+				f.Close()
+				os.Remove(f.Name())
+				return "", fmt.Errorf("write: %w", writeErr)
+			}
+			written += int64(nw)
+
+			// Report progress at most once per 500ms
+			if cfg.Progress != nil && time.Since(lastReport) > 500*time.Millisecond {
+				cfg.Progress(written, total)
+				lastReport = time.Now()
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			f.Close()
+			os.Remove(f.Name())
+			return "", fmt.Errorf("read: %w", readErr)
+		}
+	}
+
+	// Final progress report
+	if cfg.Progress != nil {
+		cfg.Progress(written, total)
+	}
+
 	f.Close()
 
 	if runtime.GOOS != "windows" {
@@ -82,6 +163,7 @@ func downloadToTemp(asset *Asset) (string, error) {
 		}
 	}
 
+	logger("downloaded %d bytes", written)
 	return f.Name(), nil
 }
 
@@ -124,7 +206,6 @@ func replaceUnix(exePath, newBinary string) (*ReplaceResult, error) {
 	}
 
 	if err := copyFile(newBinary, exePath); err != nil {
-		// rollback
 		os.Rename(backup, exePath)
 		return nil, fmt.Errorf("copy new binary: %w", err)
 	}

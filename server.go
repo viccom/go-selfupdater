@@ -21,6 +21,7 @@ func NewServer(updater *Updater) *Server {
 	s.mux.HandleFunc("/api/version", s.handleVersion)
 	s.mux.HandleFunc("/api/check", s.handleCheck)
 	s.mux.HandleFunc("/api/update", s.handleUpdate)
+	s.mux.HandleFunc("/api/progress", s.handleProgress)
 	return s
 }
 
@@ -105,7 +106,6 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Save exe path BEFORE replacing
 	exePath, err := executablePath()
 	if err != nil {
 		writeJSON(w, map[string]interface{}{
@@ -124,30 +124,43 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := DownloadAndReplace(asset, s.updater.logger)
-	if err != nil {
-		writeJSON(w, map[string]interface{}{
-			"error":   true,
-			"message": fmt.Sprintf("update failed: %v", err),
-		})
-		return
+	cfg := &DownloadConfig{
+		MaxRetries: s.updater.retries,
+		Timeout:    s.updater.timeout,
+		Progress: func(downloaded, total int64) {
+			s.updater.progress.setProgress(downloaded, total)
+		},
 	}
 
-	CleanupBackup(result.BackupPath)
+	s.updater.progress.reset()
+	s.updater.progress.setPhase("downloading")
 
+	// Respond immediately, update in background
 	writeJSON(w, map[string]interface{}{
-		"success":     true,
-		"message":     "update completed, restarting",
-		"old_version": s.updater.current,
+		"accepted":   true,
+		"message":    "update started",
 		"new_version": release.Version,
 	})
 
 	go func() {
-		s.updater.logger("restarting after update ...")
+		result, err := DownloadAndReplace(asset, s.updater.logger, cfg)
+		if err != nil {
+			s.updater.progress.setError(err.Error())
+			s.updater.logger("update failed: %v", err)
+			return
+		}
+
+		CleanupBackup(result.BackupPath)
+		s.updater.progress.setPhase("done")
+		s.updater.logger("updated to %s, restarting ...", release.Version)
 		if err := restartWith(exePath); err != nil {
 			s.updater.logger("restart failed: %v", err)
 		}
 	}()
+}
+
+func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.updater.Progress().Snapshot())
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {

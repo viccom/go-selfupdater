@@ -9,7 +9,6 @@ import (
 )
 
 // Restart starts a new process with the updated binary and exits the current one.
-// On Windows, execve is not available, so we spawn a new process.
 func Restart() error {
 	exePath, err := executablePath()
 	if err != nil {

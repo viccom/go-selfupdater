@@ -6,23 +6,27 @@
 <title>SelfUpdate Test</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f5f5; color: #333; display: flex; justify-content: center; padding: 60px 20px; }
-.card { background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,.08); padding: 32px; max-width: 420px; width: 100%; }
-h1 { font-size: 20px; margin-bottom: 24px; color: #1a1a1a; }
-.info { background: #f8f9fa; border-radius: 8px; padding: 16px; margin-bottom: 20px; font-size: 14px; line-height: 1.8; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f5f5; color: #333; display: flex; justify-content: center; padding: 40px 20px; }
+.card { background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,.08); padding: 28px; max-width: 480px; width: 100%; }
+h1 { font-size: 20px; margin-bottom: 20px; color: #1a1a1a; }
+.info { background: #f8f9fa; border-radius: 8px; padding: 14px; margin-bottom: 16px; font-size: 14px; line-height: 1.8; }
 .info span { color: #666; }
 .info strong { color: #1a1a1a; }
-button { width: 100%; padding: 12px; border: none; border-radius: 8px; font-size: 15px; cursor: pointer; transition: opacity .2s; }
-button:disabled { opacity: .5; cursor: default; }
+button { width: 100%; padding: 11px; border: none; border-radius: 8px; font-size: 15px; cursor: pointer; transition: opacity .2s; }
+button:disabled { opacity: .45; cursor: default; }
 button + button { margin-top: 10px; }
 .btn-check { background: #4a90d9; color: #fff; }
 .btn-update { background: #52c41a; color: #fff; display: none; }
-.btn-check:hover:not(:disabled) { opacity: .85; }
-.btn-update:hover:not(:disabled) { opacity: .85; }
-.msg { margin-top: 16px; padding: 12px; border-radius: 8px; font-size: 14px; display: none; }
+button:hover:not(:disabled) { opacity: .85; }
+.msg { margin-top: 14px; padding: 10px 12px; border-radius: 8px; font-size: 13px; display: none; }
 .msg.ok { display: block; background: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; }
 .msg.err { display: block; background: #fff2f0; color: #cf1322; border: 1px solid #ffa39e; }
 .msg.info { display: block; background: #e6f7ff; color: #096dd9; border: 1px solid #91d5ff; }
+.progress { margin-top: 14px; display: none; }
+.progress.show { display: block; }
+.progress-bar-bg { background: #e8e8e8; border-radius: 4px; height: 8px; overflow: hidden; }
+.progress-bar { background: #4a90d9; height: 100%; width: 0%; transition: width .3s; }
+.progress-text { font-size: 12px; color: #888; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -30,75 +34,101 @@ button + button { margin-top: 10px; }
   <h1>SelfUpdate Test</h1>
   <div class="info" id="info">loading...</div>
   <button class="btn-check" id="btnCheck" onclick="doCheck()">版本检测</button>
-  <button class="btn-update" id="btnUpdate" onclick="doUpdate()" disabled>升级最新版</button>
+  <button class="btn-update" id="btnUpdate" onclick="doUpdate()">升级最新版</button>
+  <div class="progress" id="progress">
+    <div class="progress-bar-bg"><div class="progress-bar" id="bar"></div></div>
+    <div class="progress-text" id="progressText"></div>
+  </div>
   <div class="msg" id="msg"></div>
 </div>
 <script>
 const $=id=>document.getElementById(id);
-let latest='';
+let pollTimer=null;
 
-async function get(path){
-  const r=await fetch(path);
-  return r.json();
-}
+async function get(path){const r=await fetch(path);return r.json()}
 
 function showMsg(text,cls){
-  const m=$('msg');
-  m.textContent=text;
-  m.className='msg '+cls;
+  const m=$('msg');m.textContent=text;m.className='msg '+cls;
 }
+
+function hideMsg(){$('msg').className='msg'}
+
+function showProgress(pct,text){
+  $('progress').className='progress show';
+  $('bar').style.width=pct+'%';
+  $('progressText').textContent=text||'';
+}
+
+function hideProgress(){$('progress').className='progress'}
 
 async function loadVersion(){
   try{
     const d=await get('/api/version');
     $('info').innerHTML=`<span>版本：</span><strong>${d.version}</strong><br><span>平台：</span><strong>${d.platform}</strong><br><span>路径：</span><strong>${d.exe_path}</strong>`;
-  }catch(e){
-    $('info').textContent='无法获取版本信息';
-  }
+  }catch(e){$('info').textContent='无法获取版本信息'}
 }
 
 async function doCheck(){
   $('btnCheck').disabled=true;
   $('btnUpdate').style.display='none';
+  hideMsg();hideProgress();
   showMsg('检测中...','info');
   try{
     const d=await get('/api/check');
-    if(d.error){
-      showMsg(d.message,'err');
-    }else if(d.has_update){
-      latest=d.latest;
+    if(d.error){showMsg(d.message,'err')}
+    else if(d.has_update){
       showMsg(`发现新版本：${d.current} → ${d.latest}`,'ok');
       $('btnUpdate').disabled=false;
       $('btnUpdate').style.display='block';
       $('btnUpdate').textContent='升级到 '+d.latest;
-    }else{
-      showMsg('当前已是最新版本 '+d.latest,'info');
-    }
-  }catch(e){
-    showMsg('检测失败：'+e.message,'err');
-  }
+    }else{showMsg('当前已是最新版本 '+d.latest,'info')}
+  }catch(e){showMsg('检测失败：'+e.message,'err')}
   $('btnCheck').disabled=false;
 }
 
 async function doUpdate(){
   $('btnUpdate').disabled=true;
   $('btnCheck').disabled=true;
-  showMsg('正在升级，请稍候...','info');
+  hideMsg();
+  showProgress(0,'正在启动升级...');
   try{
-    const r=await fetch('/api/update',{method:'POST'});
-    const d=await r.json();
-    if(d.error){
-      showMsg(d.message,'err');
-      $('btnUpdate').disabled=false;
-      $('btnCheck').disabled=false;
-    }else{
-      showMsg('升级成功，正在重启...','ok');
+    await fetch('/api/update',{method:'POST'});
+  }catch(e){/* update started, may disconnect */}
+  startPoll();
+}
+
+function startPoll(){
+  if(pollTimer)clearInterval(pollTimer);
+  pollTimer=setInterval(async()=>{
+    try{
+      const p=await get('/api/progress');
+      const pct=p.percent||0;
+      showProgress(pct,`${p.phase||''} ${pct}% (${formatSize(p.downloaded)}/${formatSize(p.total)})`);
+      if(p.error){
+        clearInterval(pollTimer);
+        showMsg('升级失败：'+p.error,'err');
+        $('btnUpdate').disabled=false;$('btnCheck').disabled=false;
+        hideProgress();
+      }else if(!p.active&&p.phase==='done'){
+        clearInterval(pollTimer);
+        showMsg('升级成功，正在重启...','ok');
+        showProgress(100,'升级完成，等待重启...');
+        setTimeout(()=>loadVersion(),3000);
+      }
+    }catch(e){
+      // server restarting
+      clearInterval(pollTimer);
+      showProgress(100,'服务重启中...');
+      setTimeout(()=>{loadVersion();hideProgress();$('btnUpdate').style.display='none';$('btnUpdate').disabled=false;$('btnCheck').disabled=false;showMsg('升级完成！','ok')},3000);
     }
-  }catch(e){
-    showMsg('升级请求失败：'+e.message,'err');
-    $('btnUpdate').disabled=false;
-    $('btnCheck').disabled=false;
-  }
+  },800);
+}
+
+function formatSize(n){
+  if(!n)return '0B';
+  if(n<1024)return n+'B';
+  if(n<1048576)return(n/1024).toFixed(1)+'K';
+  return(n/1048576).toFixed(1)+'M';
 }
 
 loadVersion();
