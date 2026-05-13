@@ -15,7 +15,10 @@ func Restart() error {
 	if err != nil {
 		return err
 	}
+	return restartWith(exePath)
+}
 
+func restartWith(exePath string) error {
 	cmd := exec.Command(exePath, os.Args[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

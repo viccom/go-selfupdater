@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SelfUpdate Test</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f5f5; color: #333; display: flex; justify-content: center; padding: 60px 20px; }
+.card { background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,.08); padding: 32px; max-width: 420px; width: 100%; }
+h1 { font-size: 20px; margin-bottom: 24px; color: #1a1a1a; }
+.info { background: #f8f9fa; border-radius: 8px; padding: 16px; margin-bottom: 20px; font-size: 14px; line-height: 1.8; }
+.info span { color: #666; }
+.info strong { color: #1a1a1a; }
+button { width: 100%; padding: 12px; border: none; border-radius: 8px; font-size: 15px; cursor: pointer; transition: opacity .2s; }
+button:disabled { opacity: .5; cursor: default; }
+button + button { margin-top: 10px; }
+.btn-check { background: #4a90d9; color: #fff; }
+.btn-update { background: #52c41a; color: #fff; display: none; }
+.btn-check:hover:not(:disabled) { opacity: .85; }
+.btn-update:hover:not(:disabled) { opacity: .85; }
+.msg { margin-top: 16px; padding: 12px; border-radius: 8px; font-size: 14px; display: none; }
+.msg.ok { display: block; background: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; }
+.msg.err { display: block; background: #fff2f0; color: #cf1322; border: 1px solid #ffa39e; }
+.msg.info { display: block; background: #e6f7ff; color: #096dd9; border: 1px solid #91d5ff; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>SelfUpdate Test</h1>
+  <div class="info" id="info">loading...</div>
+  <button class="btn-check" id="btnCheck" onclick="doCheck()">版本检测</button>
+  <button class="btn-update" id="btnUpdate" onclick="doUpdate()" disabled>升级最新版</button>
+  <div class="msg" id="msg"></div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+let latest='';
+
+async function get(path){
+  const r=await fetch(path);
+  return r.json();
+}
+
+function showMsg(text,cls){
+  const m=$('msg');
+  m.textContent=text;
+  m.className='msg '+cls;
+}
+
+async function loadVersion(){
+  try{
+    const d=await get('/api/version');
+    $('info').innerHTML=`<span>版本：</span><strong>${d.version}</strong><br><span>平台：</span><strong>${d.platform}</strong><br><span>路径：</span><strong>${d.exe_path}</strong>`;
+  }catch(e){
+    $('info').textContent='无法获取版本信息';
+  }
+}
+
+async function doCheck(){
+  $('btnCheck').disabled=true;
+  $('btnUpdate').style.display='none';
+  showMsg('检测中...','info');
+  try{
+    const d=await get('/api/check');
+    if(d.error){
+      showMsg(d.message,'err');
+    }else if(d.has_update){
+      latest=d.latest;
+      showMsg(`发现新版本：${d.current} → ${d.latest}`,'ok');
+      $('btnUpdate').disabled=false;
+      $('btnUpdate').style.display='block';
+      $('btnUpdate').textContent='升级到 '+d.latest;
+    }else{
+      showMsg('当前已是最新版本 '+d.latest,'info');
+    }
+  }catch(e){
+    showMsg('检测失败：'+e.message,'err');
+  }
+  $('btnCheck').disabled=false;
+}
+
+async function doUpdate(){
+  $('btnUpdate').disabled=true;
+  $('btnCheck').disabled=true;
+  showMsg('正在升级，请稍候...','info');
+  try{
+    const r=await fetch('/api/update',{method:'POST'});
+    const d=await r.json();
+    if(d.error){
+      showMsg(d.message,'err');
+      $('btnUpdate').disabled=false;
+      $('btnCheck').disabled=false;
+    }else{
+      showMsg('升级成功，正在重启...','ok');
+    }
+  }catch(e){
+    showMsg('升级请求失败：'+e.message,'err');
+    $('btnUpdate').disabled=false;
+    $('btnCheck').disabled=false;
+  }
+}
+
+loadVersion();
+</script>
+</body>
+</html>

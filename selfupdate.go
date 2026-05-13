@@ -92,10 +92,24 @@ func (u *Updater) Update(release *Release) error {
 
 // UpdateAndRestart downloads, installs, and restarts the program.
 func (u *Updater) UpdateAndRestart(release *Release) error {
-	if err := u.Update(release); err != nil {
+	asset, err := release.AssetForCurrentPlatform()
+	if err != nil {
 		return err
 	}
 
+	// Save exe path BEFORE replacing (Linux /proc/self/exe breaks after replace)
+	exePath, err := executablePath()
+	if err != nil {
+		return fmt.Errorf("get exe path: %w", err)
+	}
+
+	result, err := DownloadAndReplace(asset, u.logger)
+	if err != nil {
+		return fmt.Errorf("update: %w", err)
+	}
+
+	CleanupBackup(result.BackupPath)
+	u.logger("updated to %s", release.Version)
 	u.logger("restarting ...")
-	return Restart()
+	return restartWith(exePath)
 }
