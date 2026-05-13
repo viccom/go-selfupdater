@@ -45,12 +45,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	release, err := s.updater.Check()
 	if err != nil {
-		writeJSON(w, map[string]interface{}{
-			"error":      true,
-			"message":    err.Error(),
-			"current":    s.updater.current,
-			"has_update": false,
-		})
+		writeErrorJSON(w, err.Error(), s.updater.current)
 		return
 	}
 
@@ -63,23 +58,25 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	asset, _ := release.AssetForCurrentPlatform()
-	assetInfo := map[string]interface{}{}
-	if asset != nil {
-		assetInfo = map[string]interface{}{
+	resp := map[string]interface{}{
+		"current":    s.updater.current,
+		"has_update": true,
+		"latest":     release.Version,
+		"date":       release.Date,
+	}
+
+	asset, err := release.AssetForCurrentPlatform()
+	if err != nil {
+		resp["asset_error"] = err.Error()
+	} else {
+		resp["asset"] = map[string]interface{}{
 			"url":    asset.URL,
 			"sha256": asset.SHA256,
 			"size":   asset.Size,
 		}
 	}
 
-	writeJSON(w, map[string]interface{}{
-		"current":    s.updater.current,
-		"has_update": true,
-		"latest":     release.Version,
-		"date":       release.Date,
-		"asset":      assetInfo,
-	})
+	writeJSON(w, resp)
 }
 
 func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
@@ -88,62 +85,48 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	release, err := s.updater.Check()
-	if err != nil {
-		writeJSON(w, map[string]interface{}{
-			"error":   true,
-			"message": fmt.Sprintf("check failed: %v", err),
-		})
+	// Prevent concurrent updates
+	if !s.updater.updateMu.TryLock() {
+		writeErrorJSON(w, "update already in progress", s.updater.current)
 		return
 	}
 
-	if release == nil {
-		writeJSON(w, map[string]interface{}{
-			"error":   true,
-			"message": "already up to date",
-			"current": s.updater.current,
-		})
-		return
-	}
-
-	exePath, err := executablePath()
-	if err != nil {
-		writeJSON(w, map[string]interface{}{
-			"error":   true,
-			"message": fmt.Sprintf("get exe path: %v", err),
-		})
-		return
-	}
-
-	asset, err := release.AssetForCurrentPlatform()
-	if err != nil {
-		writeJSON(w, map[string]interface{}{
-			"error":   true,
-			"message": err.Error(),
-		})
-		return
-	}
-
-	cfg := &DownloadConfig{
-		MaxRetries: s.updater.retries,
-		Timeout:    s.updater.timeout,
-		Progress: func(downloaded, total int64) {
-			s.updater.progress.setProgress(downloaded, total)
-		},
-	}
-
-	s.updater.progress.reset()
-	s.updater.progress.setPhase("downloading")
-
-	// Respond immediately, update in background
 	writeJSON(w, map[string]interface{}{
-		"accepted":   true,
-		"message":    "update started",
-		"new_version": release.Version,
+		"accepted": true,
+		"message":  "update started",
 	})
 
 	go func() {
-		result, err := DownloadAndReplace(asset, s.updater.logger, cfg)
+		defer s.updater.updateMu.Unlock()
+
+		release, err := s.updater.Check()
+		if err != nil {
+			s.updater.progress.setError(fmt.Sprintf("check failed: %v", err))
+			s.updater.logger("update check failed: %v", err)
+			return
+		}
+		if release == nil {
+			s.updater.progress.setError("already up to date")
+			return
+		}
+
+		asset, err := release.AssetForCurrentPlatform()
+		if err != nil {
+			s.updater.progress.setError(err.Error())
+			s.updater.logger("asset error: %v", err)
+			return
+		}
+
+		exePath, err := executablePath()
+		if err != nil {
+			s.updater.progress.setError(err.Error())
+			return
+		}
+
+		s.updater.progress.start()
+		s.updater.progress.setPhase(PhaseDownloading)
+
+		result, err := DownloadAndReplace(asset, s.updater.logger, s.updater.downloadConfig())
 		if err != nil {
 			s.updater.progress.setError(err.Error())
 			s.updater.logger("update failed: %v", err)
@@ -151,7 +134,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 
 		CleanupBackup(result.BackupPath)
-		s.updater.progress.setPhase("done")
+		s.updater.progress.setDone()
 		s.updater.logger("updated to %s, restarting ...", release.Version)
 		if err := restartWith(exePath); err != nil {
 			s.updater.logger("restart failed: %v", err)
@@ -166,6 +149,14 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
+}
+
+func writeErrorJSON(w http.ResponseWriter, message, current string) {
+	writeJSON(w, map[string]interface{}{
+		"error":   true,
+		"message": message,
+		"current": current,
+	})
 }
 
 func mustExePathStr() string {

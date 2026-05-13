@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"runtime"
 	"time"
 )
@@ -42,7 +41,7 @@ func (c *DownloadConfig) defaults() {
 }
 
 // DownloadAndReplace downloads the asset, validates it, and atomically replaces
-// the current binary. On success it returns the backup path (caller should clean up).
+// the current binary.
 func DownloadAndReplace(asset *Asset, logger func(string, ...interface{}), cfg *DownloadConfig) (*ReplaceResult, error) {
 	if logger == nil {
 		logger = func(string, ...interface{}) {}
@@ -52,13 +51,9 @@ func DownloadAndReplace(asset *Asset, logger func(string, ...interface{}), cfg *
 	}
 	cfg.defaults()
 
-	exePath, err := os.Executable()
+	exePath, err := executablePath()
 	if err != nil {
 		return nil, fmt.Errorf("get executable path: %w", err)
-	}
-	exePath, err = filepath.EvalSymlinks(exePath)
-	if err != nil {
-		return nil, fmt.Errorf("resolve symlinks: %w", err)
 	}
 
 	tmpFile, err := downloadWithRetry(asset, cfg, logger)
@@ -78,11 +73,12 @@ func DownloadAndReplace(asset *Asset, logger func(string, ...interface{}), cfg *
 
 func downloadWithRetry(asset *Asset, cfg *DownloadConfig, logger func(string, ...interface{})) (string, error) {
 	var lastErr error
+	delay := cfg.RetryDelay
 	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
 		if attempt > 0 {
-			logger("retry %d/%d after %v ...", attempt, cfg.MaxRetries, cfg.RetryDelay)
-			time.Sleep(cfg.RetryDelay)
-			cfg.RetryDelay = cfg.RetryDelay * 3 / 2 // exponential backoff
+			logger("retry %d/%d after %v ...", attempt, cfg.MaxRetries, delay)
+			time.Sleep(delay)
+			delay = delay * 3 / 2
 		}
 
 		tmpFile, err := downloadToTemp(asset, cfg, logger)
@@ -120,7 +116,7 @@ func downloadToTemp(asset *Asset, cfg *DownloadConfig, logger func(string, ...in
 
 	var written int64
 	buf := make([]byte, 32*1024)
-	lastReport := time.Now()
+	var lastReportBytes int64
 
 	for {
 		nr, readErr := resp.Body.Read(buf)
@@ -133,10 +129,9 @@ func downloadToTemp(asset *Asset, cfg *DownloadConfig, logger func(string, ...in
 			}
 			written += int64(nw)
 
-			// Report progress at most once per 500ms
-			if cfg.Progress != nil && time.Since(lastReport) > 500*time.Millisecond {
+			if cfg.Progress != nil && written-lastReportBytes >= 1<<20 {
 				cfg.Progress(written, total)
-				lastReport = time.Now()
+				lastReportBytes = written
 			}
 		}
 		if readErr == io.EOF {
@@ -149,7 +144,6 @@ func downloadToTemp(asset *Asset, cfg *DownloadConfig, logger func(string, ...in
 		}
 	}
 
-	// Final progress report
 	if cfg.Progress != nil {
 		cfg.Progress(written, total)
 	}
@@ -174,7 +168,7 @@ func validateSHA256(path, expected string) error {
 
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("open for checksum: %w", err)
 	}
 	defer f.Close()
 
@@ -191,13 +185,6 @@ func validateSHA256(path, expected string) error {
 }
 
 func replaceBinary(exePath, newBinary string) (*ReplaceResult, error) {
-	if runtime.GOOS == "windows" {
-		return replaceWindows(exePath, newBinary)
-	}
-	return replaceUnix(exePath, newBinary)
-}
-
-func replaceUnix(exePath, newBinary string) (*ReplaceResult, error) {
 	backup := exePath + ".old"
 	os.Remove(backup)
 
@@ -210,24 +197,10 @@ func replaceUnix(exePath, newBinary string) (*ReplaceResult, error) {
 		return nil, fmt.Errorf("copy new binary: %w", err)
 	}
 
-	if err := os.Chmod(exePath, 0755); err != nil {
-		return nil, fmt.Errorf("chmod new binary: %w", err)
-	}
-
-	return &ReplaceResult{OldPath: exePath, BackupPath: backup}, nil
-}
-
-func replaceWindows(exePath, newBinary string) (*ReplaceResult, error) {
-	backup := exePath + ".old"
-	os.Remove(backup)
-
-	if err := os.Rename(exePath, backup); err != nil {
-		return nil, fmt.Errorf("rename old binary: %w", err)
-	}
-
-	if err := copyFile(newBinary, exePath); err != nil {
-		os.Rename(backup, exePath)
-		return nil, fmt.Errorf("copy new binary: %w", err)
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(exePath, 0755); err != nil {
+			return nil, fmt.Errorf("chmod new binary: %w", err)
+		}
 	}
 
 	return &ReplaceResult{OldPath: exePath, BackupPath: backup}, nil

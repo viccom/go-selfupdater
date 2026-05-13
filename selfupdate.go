@@ -6,24 +6,32 @@ import (
 	"time"
 )
 
+// Phase constants for ProgressState.
+const (
+	PhaseDownloading = "downloading"
+	PhaseValidating  = "validating"
+	PhaseReplacing   = "replacing"
+	PhaseDone        = "done"
+)
+
 // ProgressState holds the current download progress for querying.
 type ProgressState struct {
-	mu        sync.RWMutex
-	Active    bool
-	Phase     string // "downloading", "validating", "replacing", "done", ""
-	Downloaded int64
-	Total      int64
-	Err        string
+	mu         sync.RWMutex
+	active     bool
+	phase      string
+	downloaded int64
+	total      int64
+	err        string
 }
 
 // Percent returns download progress as 0-100.
 func (p *ProgressState) Percent() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if p.Total <= 0 {
+	if p.total <= 0 {
 		return 0
 	}
-	return int(p.Downloaded * 100 / p.Total)
+	return int(p.downloaded * 100 / p.total)
 }
 
 // Snapshot returns a copy of the current state.
@@ -31,59 +39,67 @@ func (p *ProgressState) Snapshot() map[string]interface{} {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	m := map[string]interface{}{
-		"active":     p.Active,
-		"phase":      p.Phase,
-		"downloaded": p.Downloaded,
-		"total":      p.Total,
+		"active":     p.active,
+		"phase":      p.phase,
+		"downloaded": p.downloaded,
+		"total":      p.total,
 		"percent":    0,
 	}
-	if p.Total > 0 {
-		m["percent"] = p.Downloaded * 100 / p.Total
+	if p.total > 0 {
+		m["percent"] = p.downloaded * 100 / p.total
 	}
-	if p.Err != "" {
-		m["error"] = p.Err
+	if p.err != "" {
+		m["error"] = p.err
 	}
 	return m
 }
 
 func (p *ProgressState) setPhase(phase string) {
 	p.mu.Lock()
-	p.Phase = phase
+	p.phase = phase
 	p.mu.Unlock()
 }
 
 func (p *ProgressState) setProgress(downloaded, total int64) {
 	p.mu.Lock()
-	p.Downloaded = downloaded
-	p.Total = total
+	p.downloaded = downloaded
+	p.total = total
 	p.mu.Unlock()
 }
 
 func (p *ProgressState) setError(err string) {
 	p.mu.Lock()
-	p.Err = err
-	p.Active = false
+	p.err = err
+	p.active = false
 	p.mu.Unlock()
 }
 
-func (p *ProgressState) reset() {
+func (p *ProgressState) setDone() {
 	p.mu.Lock()
-	p.Active = true
-	p.Phase = ""
-	p.Downloaded = 0
-	p.Total = 0
-	p.Err = ""
+	p.active = false
+	p.phase = PhaseDone
+	p.mu.Unlock()
+}
+
+func (p *ProgressState) start() {
+	p.mu.Lock()
+	p.active = true
+	p.phase = PhaseDownloading
+	p.downloaded = 0
+	p.total = 0
+	p.err = ""
 	p.mu.Unlock()
 }
 
 // Updater checks for updates and applies them.
 type Updater struct {
-	source   Source
-	current  string
-	logger   func(string, ...interface{})
+	source  Source
+	current string
+	logger  func(string, ...interface{})
 	progress ProgressState
 	retries  int
 	timeout  time.Duration
+	updateMu sync.Mutex
 }
 
 // New creates a new Updater with the given source and current version.
@@ -162,25 +178,15 @@ func (u *Updater) Update(release *Release) error {
 		return err
 	}
 
-	cfg := &DownloadConfig{
-		MaxRetries: u.retries,
-		Timeout:    u.timeout,
-		Progress: func(downloaded, total int64) {
-			u.progress.setProgress(downloaded, total)
-		},
-	}
+	u.progress.start()
 
-	u.progress.reset()
-	u.progress.setPhase("downloading")
-
-	result, err := DownloadAndReplace(asset, u.logger, cfg)
+	result, err := DownloadAndReplace(asset, u.logger, u.downloadConfig())
 	if err != nil {
 		u.progress.setError(err.Error())
 		return fmt.Errorf("update: %w", err)
 	}
 
-	u.progress.setPhase("done")
-	u.progress.Active = false
+	u.progress.setDone()
 	CleanupBackup(result.BackupPath)
 	u.logger("updated to %s", release.Version)
 	return nil
@@ -198,26 +204,27 @@ func (u *Updater) UpdateAndRestart(release *Release) error {
 		return fmt.Errorf("get exe path: %w", err)
 	}
 
-	cfg := &DownloadConfig{
-		MaxRetries: u.retries,
-		Timeout:    u.timeout,
-		Progress: func(downloaded, total int64) {
-			u.progress.setProgress(downloaded, total)
-		},
-	}
+	u.progress.start()
 
-	u.progress.reset()
-	u.progress.setPhase("downloading")
-
-	result, err := DownloadAndReplace(asset, u.logger, cfg)
+	result, err := DownloadAndReplace(asset, u.logger, u.downloadConfig())
 	if err != nil {
 		u.progress.setError(err.Error())
 		return fmt.Errorf("update: %w", err)
 	}
 
 	CleanupBackup(result.BackupPath)
-	u.progress.setPhase("done")
+	u.progress.setDone()
 	u.logger("updated to %s", release.Version)
 	u.logger("restarting ...")
 	return restartWith(exePath)
+}
+
+func (u *Updater) downloadConfig() *DownloadConfig {
+	return &DownloadConfig{
+		MaxRetries: u.retries,
+		Timeout:    u.timeout,
+		Progress: func(downloaded, total int64) {
+			u.progress.setProgress(downloaded, total)
+		},
+	}
 }

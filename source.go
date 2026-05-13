@@ -65,13 +65,8 @@ func (s *HTTPSource) GetLatest() (*Release, error) {
 		return nil, fmt.Errorf("release endpoint returned %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, fmt.Errorf("read release response: %w", err)
-	}
-
 	var release Release
-	if err := json.Unmarshal(body, &release); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&release); err != nil {
 		return nil, fmt.Errorf("parse release JSON: %w", err)
 	}
 
