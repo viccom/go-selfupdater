@@ -1,22 +1,42 @@
 package selfupdate
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"runtime"
+	"strings"
 )
 
 // Server exposes update functionality via REST API.
 type Server struct {
-	updater *Updater
-	mux     *http.ServeMux
+	updater   *Updater
+	mux       *http.ServeMux
+	authToken string // if non-empty, mutating endpoints require Bearer token
+}
+
+// ServerOption configures a Server.
+type ServerOption func(*Server)
+
+// WithAuthToken requires the given Bearer token for mutating endpoints
+// (/api/update). Read-only endpoints (/api/version, /api/check,
+// /api/progress) remain unauthenticated. Use a cryptographically random
+// token of at least 32 bytes.
+func WithAuthToken(token string) ServerOption {
+	return func(s *Server) {
+		s.authToken = token
+	}
 }
 
 // NewServer creates an update API server wrapping the given Updater.
-func NewServer(updater *Updater) *Server {
+func NewServer(updater *Updater, opts ...ServerOption) *Server {
 	s := &Server{
 		updater: updater,
 		mux:     http.NewServeMux(),
+	}
+	for _, o := range opts {
+		o(s)
 	}
 	s.mux.HandleFunc("/api/version", s.handleVersion)
 	s.mux.HandleFunc("/api/check", s.handleCheck)
@@ -32,6 +52,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Handler returns the http.Handler for embedding in existing servers.
 func (s *Server) Handler() http.Handler {
 	return s.mux
+}
+
+// checkAuth returns true if the request carries a valid Bearer token.
+// If no auth token is configured, all requests are allowed.
+func (s *Server) checkAuth(r *http.Request) bool {
+	if s.authToken == "" {
+		return true
+	}
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return false
+	}
+	token := strings.TrimPrefix(auth, "Bearer ")
+	return subtle.ConstantTimeCompare([]byte(token), []byte(s.authToken)) == 1
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
@@ -85,6 +119,15 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.checkAuth(r) {
+		w.WriteHeader(http.StatusUnauthorized)
+		writeJSON(w, map[string]interface{}{
+			"error":   true,
+			"message": "unauthorized",
+		})
+		return
+	}
+
 	// Prevent concurrent updates
 	if !s.updater.updateMu.TryLock() {
 		writeErrorJSON(w, "update already in progress", s.updater.current)
@@ -133,7 +176,10 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		CleanupBackup(result.BackupPath)
+		// Only cleanup on Linux; on Windows the .old is locked
+		if runtime.GOOS != "windows" {
+			CleanupStaleBackup(result.BackupPath)
+		}
 		s.updater.progress.setDone()
 		s.updater.logger("updated to %s, restarting ...", release.Version)
 		if err := restartWith(exePath); err != nil {

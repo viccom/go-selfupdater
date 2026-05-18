@@ -21,10 +21,23 @@ func TestCompareVersions(t *testing.T) {
 		{"v1.0.0", "1.0.0", 0},
 		{"v1.2.3", "v1.2.4", -1},
 		{"1.0", "1.0.0", 0},
-		{"1.0.0-alpha", "1.0.0", 0},
 		{"1.0.0+build", "1.0.0", 0},
 		{"0.9.9", "1.0.0", -1},
 		{"10.0.0", "9.0.0", 1},
+		// Pre-release: lower precedence than normal
+		{"1.0.0-alpha", "1.0.0", -1},
+		{"1.0.0", "1.0.0-alpha", 1},
+		{"1.0.0-alpha", "1.0.0-alpha", 0},
+		// Pre-release: numeric < alphanumeric
+		{"1.0.0-1", "1.0.0-alpha", -1},
+		// Pre-release: numeric comparison
+		{"1.0.0-2", "1.0.0-10", -1},
+		// Pre-release: lexicographic
+		{"1.0.0-alpha", "1.0.0-beta", -1},
+		// Pre-release: dot-separated identifiers
+		{"1.0.0-alpha.1", "1.0.0-alpha.2", -1},
+		// Shorter pre-release has lower precedence
+		{"1.0.0-alpha", "1.0.0-alpha.1", -1},
 	}
 
 	for _, tt := range tests {
@@ -45,6 +58,10 @@ func TestIsNewer(t *testing.T) {
 		{"0.9.0", "1.0.0", false},
 		{"2.0.0", "1.9.9", true},
 		{"v1.1.0", "v1.0.0", true},
+		// Pre-release: 1.0.0 is newer than 1.0.0-beta
+		{"1.0.0", "1.0.0-beta", true},
+		// Pre-release: 1.0.0-beta is NOT newer than 1.0.0
+		{"1.0.0-beta", "1.0.0", false},
 	}
 
 	for _, tt := range tests {
@@ -56,14 +73,26 @@ func TestIsNewer(t *testing.T) {
 }
 
 func TestValidateVersion(t *testing.T) {
-	if err := ValidateVersion("1.0.0"); err != nil {
-		t.Errorf("ValidateVersion(\"1.0.0\") = %v", err)
+	valid := []string{"1.0.0", "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0+build", "1.0", "1"}
+	for _, v := range valid {
+		if err := ValidateVersion(v); err != nil {
+			t.Errorf("ValidateVersion(%q) should be valid, got: %v", v, err)
+		}
 	}
-	if err := ValidateVersion(""); err == nil {
-		t.Error("ValidateVersion(\"\") should return error")
+
+	invalid := []struct {
+		v    string
+		desc string
+	}{
+		{"", "empty"},
+		{"1..0", "double dot"},
+		{"1.0.0a", "non-numeric segment without pre-release separator"},
+		{"1.a.0", "non-numeric segment"},
 	}
-	if err := ValidateVersion("1..0"); err == nil {
-		t.Error("ValidateVersion(\"1..0\") should return error")
+	for _, tt := range invalid {
+		if err := ValidateVersion(tt.v); err == nil {
+			t.Errorf("ValidateVersion(%q) should fail (%s)", tt.v, tt.desc)
+		}
 	}
 }
 
@@ -149,7 +178,6 @@ func TestSHA256Validation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// compute expected hash
 	invalidHash := "0000000000000000000000000000000000000000000000000000000000000000"
 	if err := validateSHA256(testFile, invalidHash); err == nil {
 		t.Error("expected error for wrong sha256")

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -46,6 +47,24 @@ type HTTPSource struct {
 }
 
 func NewHTTPSource(url string) *HTTPSource {
+	if url != "" && strings.HasPrefix(url, "http://") {
+		// Auto-upgrade http:// to https:// for non-localhost URLs
+		// to prevent MITM on the release manifest.
+		host := url[len("http://"):]
+		if idx := strings.Index(host, "/"); idx >= 0 {
+			host = host[:idx]
+		}
+		// Strip port for loopback check
+		hostNoPort := host
+		if idx := strings.LastIndex(host, ":"); idx >= 0 {
+			hostNoPort = host[:idx]
+		}
+		// Check for localhost variants (loopback addresses are safe without TLS)
+		if hostNoPort != "localhost" && hostNoPort != "127.0.0.1" && hostNoPort != "::1" &&
+			!strings.EqualFold(hostNoPort, "localhost") {
+			url = "https://" + url[len("http://"):]
+		}
+	}
 	return &HTTPSource{
 		URL: url,
 		Client: &http.Client{

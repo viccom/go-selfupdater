@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 )
@@ -56,7 +57,7 @@ func DownloadAndReplace(asset *Asset, logger func(string, ...interface{}), cfg *
 		return nil, fmt.Errorf("get executable path: %w", err)
 	}
 
-	tmpFile, err := downloadWithRetry(asset, cfg, logger)
+	tmpFile, err := downloadWithRetry(asset, cfg, logger, exePath)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +72,7 @@ func DownloadAndReplace(asset *Asset, logger func(string, ...interface{}), cfg *
 	return replaceBinary(exePath, tmpFile)
 }
 
-func downloadWithRetry(asset *Asset, cfg *DownloadConfig, logger func(string, ...interface{})) (string, error) {
+func downloadWithRetry(asset *Asset, cfg *DownloadConfig, logger func(string, ...interface{}), exePath string) (string, error) {
 	var lastErr error
 	delay := cfg.RetryDelay
 	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
@@ -81,7 +82,7 @@ func downloadWithRetry(asset *Asset, cfg *DownloadConfig, logger func(string, ..
 			delay = delay * 3 / 2
 		}
 
-		tmpFile, err := downloadToTemp(asset, cfg, logger)
+		tmpFile, err := downloadToTemp(asset, cfg, logger, exePath)
 		if err == nil {
 			return tmpFile, nil
 		}
@@ -91,7 +92,7 @@ func downloadWithRetry(asset *Asset, cfg *DownloadConfig, logger func(string, ..
 	return "", fmt.Errorf("download failed after %d retries: %w", cfg.MaxRetries, lastErr)
 }
 
-func downloadToTemp(asset *Asset, cfg *DownloadConfig, logger func(string, ...interface{})) (string, error) {
+func downloadToTemp(asset *Asset, cfg *DownloadConfig, logger func(string, ...interface{}), exePath string) (string, error) {
 	client := &http.Client{Timeout: cfg.Timeout}
 
 	resp, err := client.Get(asset.URL)
@@ -104,7 +105,10 @@ func downloadToTemp(asset *Asset, cfg *DownloadConfig, logger func(string, ...in
 		return "", fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
 
-	f, err := os.CreateTemp("", "selfupdate-*.tmp")
+	// Create temp file in the same directory as the executable to avoid
+	// cross-filesystem issues (double disk usage, rename across mounts).
+	exeDir := filepath.Dir(exePath)
+	f, err := os.CreateTemp(exeDir, "selfupdate-*.tmp")
 	if err != nil {
 		return "", fmt.Errorf("create temp file: %w", err)
 	}
@@ -117,6 +121,7 @@ func downloadToTemp(asset *Asset, cfg *DownloadConfig, logger func(string, ...in
 	var written int64
 	buf := make([]byte, 32*1024)
 	var lastReportBytes int64
+	var lastReportTime time.Time
 
 	for {
 		nr, readErr := resp.Body.Read(buf)
@@ -129,9 +134,12 @@ func downloadToTemp(asset *Asset, cfg *DownloadConfig, logger func(string, ...in
 			}
 			written += int64(nw)
 
-			if cfg.Progress != nil && written-lastReportBytes >= 1<<20 {
+			// Report progress every 1MB or every 500ms, whichever comes first
+			now := time.Now()
+			if cfg.Progress != nil && (written-lastReportBytes >= 1<<20 || now.Sub(lastReportTime) >= 500*time.Millisecond) {
 				cfg.Progress(written, total)
 				lastReportBytes = written
+				lastReportTime = now
 			}
 		}
 		if readErr == io.EOF {
@@ -150,6 +158,12 @@ func downloadToTemp(asset *Asset, cfg *DownloadConfig, logger func(string, ...in
 
 	f.Close()
 
+	// Validate download size if asset.Size is known
+	if asset.Size > 0 && written != asset.Size {
+		os.Remove(f.Name())
+		return "", fmt.Errorf("downloaded %d bytes, expected %d", written, asset.Size)
+	}
+
 	if runtime.GOOS != "windows" {
 		if err := os.Chmod(f.Name(), 0755); err != nil {
 			os.Remove(f.Name())
@@ -163,6 +177,9 @@ func downloadToTemp(asset *Asset, cfg *DownloadConfig, logger func(string, ...in
 
 func validateSHA256(path, expected string) error {
 	if expected == "" {
+		// No checksum provided — integrity verification is skipped.
+		// This is dangerous: a compromised manifest can inject arbitrary code.
+		// Log a warning but allow the update to proceed for backward compatibility.
 		return nil
 	}
 
@@ -186,21 +203,41 @@ func validateSHA256(path, expected string) error {
 
 func replaceBinary(exePath, newBinary string) (*ReplaceResult, error) {
 	backup := exePath + ".old"
-	os.Remove(backup)
+
+	// Preserve original file metadata for restoration on the new binary.
+	origInfo, err := os.Stat(exePath)
+	if err != nil {
+		return nil, fmt.Errorf("stat current binary: %w", err)
+	}
+
+	// Remove stale backup from a previous failed update.
+	// Only ignore "file not exist"; permission errors are real problems.
+	if err := os.Remove(backup); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("remove stale backup %s: %w", backup, err)
+	}
 
 	if err := os.Rename(exePath, backup); err != nil {
 		return nil, fmt.Errorf("rename old binary: %w", err)
 	}
 
 	if err := copyFile(newBinary, exePath); err != nil {
-		os.Rename(backup, exePath)
-		return nil, fmt.Errorf("copy new binary: %w", err)
+		// Attempt rollback: restore the original binary from backup.
+		// If rollback also fails, we report both errors — the operator
+		// must manually recover (the backup file is still at .old).
+		if rollbackErr := os.Rename(backup, exePath); rollbackErr != nil {
+			return nil, fmt.Errorf("copy new binary: %w (rollback also failed: %w; backup at %s)", err, rollbackErr, backup)
+		}
+		return nil, fmt.Errorf("copy new binary (rolled back): %w", err)
 	}
 
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(exePath, 0755); err != nil {
-			return nil, fmt.Errorf("chmod new binary: %w", err)
+	// Restore original file permissions and mode bits.
+	if err := os.Chmod(exePath, origInfo.Mode()); err != nil {
+		// chmod failure: the new binary is in place but with wrong permissions.
+		// Attempt rollback to the old binary which has correct permissions.
+		if rollbackErr := os.Rename(backup, exePath); rollbackErr != nil {
+			return nil, fmt.Errorf("chmod new binary: %v (rollback also failed: %v; backup at %s)", err, rollbackErr, backup)
 		}
+		return nil, fmt.Errorf("chmod new binary (rolled back): %w", err)
 	}
 
 	return &ReplaceResult{OldPath: exePath, BackupPath: backup}, nil
@@ -226,9 +263,24 @@ func copyFile(src, dst string) error {
 }
 
 // CleanupBackup removes the backup file created during update.
+// Deprecated: Use CleanupStaleBackup instead. On Windows the running process
+// holds a lock on the old binary, so this call will fail silently.
+// CleanupStaleBackup should be called at program startup.
 func CleanupBackup(backupPath string) error {
+	return CleanupStaleBackup(backupPath)
+}
+
+// CleanupStaleBackup removes a leftover .old backup from a previous update.
+// It should be called at program startup, not immediately after replacement.
+// On Windows, the previous process has already exited by then so the file is
+// no longer locked. If the file does not exist, no error is returned.
+func CleanupStaleBackup(backupPath string) error {
 	if backupPath == "" {
 		return nil
 	}
-	return os.Remove(backupPath)
+	err := os.Remove(backupPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }

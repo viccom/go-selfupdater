@@ -3,20 +3,30 @@
 package selfupdate
 
 import (
+	"fmt"
 	"os"
 	"syscall"
 )
 
 // Restart replaces the current process with the updated binary.
-// On Unix, this uses execve so the process PID stays the same.
+// Uses the cached exe path from Update() if available, because after
+// binary replacement /proc/self/exe may point to the deleted .old file.
 func Restart() error {
-	exePath, err := executablePath()
-	if err != nil {
-		return err
-	}
-	return restartWith(exePath)
+	return globalRestart("")
 }
 
 func restartWith(exePath string) error {
+	return globalRestart(exePath)
+}
+
+func globalRestart(cachedExePath string) error {
+	exePath := cachedExePath
+	if exePath == "" {
+		path, err := executablePath()
+		if err != nil {
+			return fmt.Errorf("get exe path for restart: %w", err)
+		}
+		exePath = path
+	}
 	return syscall.Exec(exePath, os.Args, os.Environ())
 }
