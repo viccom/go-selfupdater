@@ -178,13 +178,15 @@ func TestSHA256Validation(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	silentLogger := func(string, ...any) {}
+
 	invalidHash := "0000000000000000000000000000000000000000000000000000000000000000"
-	if err := validateSHA256(testFile, invalidHash); err == nil {
+	if err := validateSHA256(testFile, invalidHash, silentLogger); err == nil {
 		t.Error("expected error for wrong sha256")
 	}
 
-	// empty checksum should skip validation
-	if err := validateSHA256(testFile, ""); err != nil {
+	// empty checksum should skip validation (but log warning)
+	if err := validateSHA256(testFile, "", silentLogger); err != nil {
 		t.Errorf("empty checksum should skip validation: %v", err)
 	}
 }

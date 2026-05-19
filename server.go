@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"runtime"
 	"strings"
 )
 
@@ -60,11 +59,7 @@ func (s *Server) checkAuth(r *http.Request) bool {
 	if s.authToken == "" {
 		return true
 	}
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "Bearer ") {
-		return false
-	}
-	token := strings.TrimPrefix(auth, "Bearer ")
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	return subtle.ConstantTimeCompare([]byte(token), []byte(s.authToken)) == 1
 }
 
@@ -84,7 +79,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if release == nil {
-		writeJSON(w, map[string]interface{}{
+		writeJSON(w, map[string]any{
 			"current":    s.updater.current,
 			"has_update": false,
 			"latest":     s.updater.current,
@@ -92,7 +87,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := map[string]interface{}{
+	resp := map[string]any{
 		"current":    s.updater.current,
 		"has_update": true,
 		"latest":     release.Version,
@@ -103,7 +98,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		resp["asset_error"] = err.Error()
 	} else {
-		resp["asset"] = map[string]interface{}{
+		resp["asset"] = map[string]any{
 			"url":    asset.URL,
 			"sha256": asset.SHA256,
 			"size":   asset.Size,
@@ -121,7 +116,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	if !s.checkAuth(r) {
 		w.WriteHeader(http.StatusUnauthorized)
-		writeJSON(w, map[string]interface{}{
+		writeJSON(w, map[string]any{
 			"error":   true,
 			"message": "unauthorized",
 		})
@@ -134,7 +129,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, map[string]interface{}{
+	writeJSON(w, map[string]any{
 		"accepted": true,
 		"message":  "update started",
 	})
@@ -149,41 +144,13 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if release == nil {
-			s.updater.progress.setError("already up to date")
+			s.updater.progress.setDone()
+				s.updater.logger("already up to date")
 			return
 		}
 
-		asset, err := release.AssetForCurrentPlatform()
-		if err != nil {
-			s.updater.progress.setError(err.Error())
-			s.updater.logger("asset error: %v", err)
-			return
-		}
-
-		exePath, err := executablePath()
-		if err != nil {
-			s.updater.progress.setError(err.Error())
-			return
-		}
-
-		s.updater.progress.start()
-		s.updater.progress.setPhase(PhaseDownloading)
-
-		result, err := DownloadAndReplace(asset, s.updater.logger, s.updater.downloadConfig())
-		if err != nil {
-			s.updater.progress.setError(err.Error())
+		if err := s.updater.updateAndRestartLocked(release); err != nil {
 			s.updater.logger("update failed: %v", err)
-			return
-		}
-
-		// Only cleanup on Linux; on Windows the .old is locked
-		if runtime.GOOS != "windows" {
-			CleanupStaleBackup(result.BackupPath)
-		}
-		s.updater.progress.setDone()
-		s.updater.logger("updated to %s, restarting ...", release.Version)
-		if err := restartWith(exePath); err != nil {
-			s.updater.logger("restart failed: %v", err)
 		}
 	}()
 }
@@ -192,13 +159,13 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.updater.Progress().Snapshot())
 }
 
-func writeJSON(w http.ResponseWriter, v interface{}) {
+func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
 }
 
 func writeErrorJSON(w http.ResponseWriter, message, current string) {
-	writeJSON(w, map[string]interface{}{
+	writeJSON(w, map[string]any{
 		"error":   true,
 		"message": message,
 		"current": current,

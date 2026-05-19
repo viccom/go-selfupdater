@@ -157,7 +157,7 @@ func cliGet(addr, path string) {
 		log.Fatalf("daemon not reachable at %s: %v", addr, err)
 	}
 	defer resp.Body.Close()
-	var v interface{}
+	var v any
 	json.NewDecoder(resp.Body).Decode(&v)
 	out, _ := json.MarshalIndent(v, "", "  ")
 	fmt.Println(string(out))
@@ -169,7 +169,7 @@ func cliPost(addr, path string) {
 		log.Fatalf("daemon not reachable at %s: %v", addr, err)
 	}
 	defer resp.Body.Close()
-	var v interface{}
+	var v any
 	json.NewDecoder(resp.Body).Decode(&v)
 	out, _ := json.MarshalIndent(v, "", "  ")
 	fmt.Println(string(out))
@@ -215,7 +215,7 @@ func serveMock(addr string) {
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
 
-func writeJSON(w http.ResponseWriter, v interface{}) {
+func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
 }
@@ -227,7 +227,9 @@ func fileSHA256(path string) string {
 	}
 	defer f.Close()
 	h := sha256.New()
-	io.Copy(h, f)
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 

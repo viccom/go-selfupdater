@@ -43,9 +43,9 @@ func (c *DownloadConfig) defaults() {
 
 // DownloadAndReplace downloads the asset, validates it, and atomically replaces
 // the current binary.
-func DownloadAndReplace(asset *Asset, logger func(string, ...interface{}), cfg *DownloadConfig) (*ReplaceResult, error) {
+func DownloadAndReplace(asset *Asset, logger func(string, ...any), cfg *DownloadConfig) (*ReplaceResult, error) {
 	if logger == nil {
-		logger = func(string, ...interface{}) {}
+		logger = func(string, ...any) {}
 	}
 	if cfg == nil {
 		cfg = &DownloadConfig{}
@@ -64,7 +64,7 @@ func DownloadAndReplace(asset *Asset, logger func(string, ...interface{}), cfg *
 	defer os.Remove(tmpFile)
 
 	logger("validating checksum ...")
-	if err := validateSHA256(tmpFile, asset.SHA256); err != nil {
+	if err := validateSHA256(tmpFile, asset.SHA256, logger); err != nil {
 		return nil, err
 	}
 
@@ -72,7 +72,7 @@ func DownloadAndReplace(asset *Asset, logger func(string, ...interface{}), cfg *
 	return replaceBinary(exePath, tmpFile)
 }
 
-func downloadWithRetry(asset *Asset, cfg *DownloadConfig, logger func(string, ...interface{}), exePath string) (string, error) {
+func downloadWithRetry(asset *Asset, cfg *DownloadConfig, logger func(string, ...any), exePath string) (string, error) {
 	var lastErr error
 	delay := cfg.RetryDelay
 	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
@@ -92,7 +92,7 @@ func downloadWithRetry(asset *Asset, cfg *DownloadConfig, logger func(string, ..
 	return "", fmt.Errorf("download failed after %d retries: %w", cfg.MaxRetries, lastErr)
 }
 
-func downloadToTemp(asset *Asset, cfg *DownloadConfig, logger func(string, ...interface{}), exePath string) (string, error) {
+func downloadToTemp(asset *Asset, cfg *DownloadConfig, logger func(string, ...any), exePath string) (string, error) {
 	client := &http.Client{Timeout: cfg.Timeout}
 
 	resp, err := client.Get(asset.URL)
@@ -175,11 +175,9 @@ func downloadToTemp(asset *Asset, cfg *DownloadConfig, logger func(string, ...in
 	return f.Name(), nil
 }
 
-func validateSHA256(path, expected string) error {
+func validateSHA256(path, expected string, logger func(string, ...any)) error {
 	if expected == "" {
-		// No checksum provided — integrity verification is skipped.
-		// This is dangerous: a compromised manifest can inject arbitrary code.
-		// Log a warning but allow the update to proceed for backward compatibility.
+		logger("WARNING: SHA256 checksum not provided, skipping integrity verification")
 		return nil
 	}
 

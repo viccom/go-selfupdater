@@ -60,7 +60,7 @@ func NewHTTPSource(url string) *HTTPSource {
 			hostNoPort = host[:idx]
 		}
 		// Check for localhost variants (loopback addresses are safe without TLS)
-		if hostNoPort != "localhost" && hostNoPort != "127.0.0.1" && hostNoPort != "::1" &&
+		if hostNoPort != "127.0.0.1" && hostNoPort != "::1" &&
 			!strings.EqualFold(hostNoPort, "localhost") {
 			url = "https://" + url[len("http://"):]
 		}

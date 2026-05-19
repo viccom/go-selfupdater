@@ -10,8 +10,6 @@ import (
 // Phase constants for ProgressState.
 const (
 	PhaseDownloading = "downloading"
-	PhaseValidating  = "validating"
-	PhaseReplacing   = "replacing"
 	PhaseDone        = "done"
 )
 
@@ -64,11 +62,11 @@ func (p *ProgressState) Snapshot() ProgressSnapshot {
 	return s
 }
 
-// SnapshotMap returns the current state as a map[string]interface{}.
+// SnapshotMap returns the current state as a map[string]any.
 // Deprecated: Use Snapshot() which returns a typed ProgressSnapshot.
-func (p *ProgressState) SnapshotMap() map[string]interface{} {
+func (p *ProgressState) SnapshotMap() map[string]any {
 	s := p.Snapshot()
-	m := map[string]interface{}{
+	m := map[string]any{
 		"active":     s.Active,
 		"phase":      s.Phase,
 		"percent":    s.Percent,
@@ -79,12 +77,6 @@ func (p *ProgressState) SnapshotMap() map[string]interface{} {
 		m["error"] = s.Error
 	}
 	return m
-}
-
-func (p *ProgressState) setPhase(phase string) {
-	p.mu.Lock()
-	p.phase = phase
-	p.mu.Unlock()
 }
 
 func (p *ProgressState) setProgress(downloaded, total int64) {
@@ -122,7 +114,7 @@ func (p *ProgressState) start() {
 type Updater struct {
 	source   Source
 	current  string
-	logger   func(string, ...interface{})
+	logger   func(string, ...any)
 	progress ProgressState
 	retries  int
 	timeout  time.Duration
@@ -150,7 +142,7 @@ func New(source Source, currentVersion string, opts ...Option) *Updater {
 type Option func(*Updater)
 
 // WithLogger sets a custom logger function.
-func WithLogger(logger func(string, ...interface{})) Option {
+func WithLogger(logger func(string, ...any)) Option {
 	return func(u *Updater) {
 		u.logger = logger
 	}
@@ -210,19 +202,40 @@ func (u *Updater) Update(release *Release) (*ReplaceResult, error) {
 		return nil, fmt.Errorf("update already in progress")
 	}
 	defer u.updateMu.Unlock()
+	return u.updateLocked(release)
+}
 
+// UpdateAndRestart downloads, installs, and restarts the program.
+// The .old backup is cleaned up only on Linux/macOS (where the file is not locked).
+// On Windows, the .old remains until the next startup calls CleanupStaleBackup.
+// Concurrent calls are serialized via mutex.
+func (u *Updater) UpdateAndRestart(release *Release) error {
+	if !u.updateMu.TryLock() {
+		return fmt.Errorf("update already in progress")
+	}
+	defer u.updateMu.Unlock()
+	return u.updateAndRestartLocked(release)
+}
+
+// updateLocked performs the download-replace cycle.
+// Caller must hold u.updateMu.
+func (u *Updater) updateLocked(release *Release) (*ReplaceResult, error) {
 	asset, err := release.AssetForCurrentPlatform()
 	if err != nil {
+		u.progress.setError(err.Error())
 		return nil, err
 	}
 
-	// Cache exe path BEFORE replacement for Restart() on Linux
-	// where /proc/self/exe points to the deleted .old after replacement.
-	if exePath, err := executablePath(); err == nil {
-		u.exeMu.Lock()
-		u.exePath = exePath
-		u.exeMu.Unlock()
+	// Cache exe path BEFORE replacement for DoRestart(), because on some
+	// platforms the resolved path may be stale after binary replacement.
+	exePath, err := executablePath()
+	if err != nil {
+		u.progress.setError(err.Error())
+		return nil, fmt.Errorf("get exe path: %w", err)
 	}
+	u.exeMu.Lock()
+	u.exePath = exePath
+	u.exeMu.Unlock()
 
 	u.progress.start()
 
@@ -237,47 +250,25 @@ func (u *Updater) Update(release *Release) (*ReplaceResult, error) {
 	return result, nil
 }
 
-// UpdateAndRestart downloads, installs, and restarts the program.
-// The .old backup is cleaned up only on Linux (where the file is not locked).
-// On Windows, the .old remains until the next startup calls CleanupStaleBackup.
-// Concurrent calls are serialized via mutex.
-func (u *Updater) UpdateAndRestart(release *Release) error {
-	if !u.updateMu.TryLock() {
-		return fmt.Errorf("update already in progress")
-	}
-	defer u.updateMu.Unlock()
-	asset, err := release.AssetForCurrentPlatform()
+// updateAndRestartLocked performs the download-replace-restart cycle.
+// Caller must hold u.updateMu.
+func (u *Updater) updateAndRestartLocked(release *Release) error {
+	result, err := u.updateLocked(release)
 	if err != nil {
 		return err
 	}
 
-	exePath, err := executablePath()
-	if err != nil {
-		return fmt.Errorf("get exe path: %w", err)
-	}
-
-	// Cache for DoRestart() consistency
-	u.exeMu.Lock()
-	u.exePath = exePath
-	u.exeMu.Unlock()
-
-	u.progress.start()
-
-	result, err := DownloadAndReplace(asset, u.logger, u.downloadConfig())
-	if err != nil {
-		u.progress.setError(err.Error())
-		return fmt.Errorf("update: %w", err)
-	}
-
-	// Only cleanup on Linux; on Windows the .old is locked by the running process
+	// Only cleanup on Linux/macOS; on Windows the .old is locked by the running process
 	if runtime.GOOS != "windows" {
 		CleanupStaleBackup(result.BackupPath)
 	}
 
-	u.progress.setDone()
-	u.logger("updated to %s", release.Version)
 	u.logger("restarting ...")
-	return restartWith(exePath)
+	if err := restartWith(result.OldPath); err != nil {
+		u.progress.setError(err.Error())
+		return err
+	}
+	return nil
 }
 
 func (u *Updater) downloadConfig() *DownloadConfig {

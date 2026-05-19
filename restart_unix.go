@@ -10,7 +10,7 @@ import (
 
 // Restart replaces the current process with the updated binary.
 // Uses the cached exe path from Update() if available, because after
-// binary replacement /proc/self/exe may point to the deleted .old file.
+// binary replacement the resolved exe path may be stale on some platforms.
 func Restart() error {
 	return globalRestart("")
 }
